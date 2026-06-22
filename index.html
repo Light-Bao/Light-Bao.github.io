@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><!--创造性声明：
+
+本作品名为“形近填词诗机”。
+
+本网页使用本人整理的语料库生成诗歌内容:
+我从开源项目https://github.com/sheepzh/poetry（包含大量现代诗数据）下载了语料包，解压后其数据以数百个 JSON 文件的形式散落嵌套在各个子文件夹中。 利用python的脚本和结巴分词工具，我将这些 JSON 文件中的 subjects、verbs、adjectives 三类词语提取出来，去重后写入 corpus.js 文件中。 corpus.js 文件中包含了三个数组，分别是 subjects、verbs、adjectives。
+corpus.js 中的 subjects、verbs、adjectives 会被读取并使用。
+
+生成机制： 
+1. 用户输入命题，程序分析输入中的中文、英文、数字、长度和换行。
+2. 如果输入包含中文，程序会根据输入汉字与语料词之间的 Unicode 编码距离选词， 形成“形近 / 部件偏向”的伪扣题效果。 
+3. 如果输入为英文、数字或符号，程序只使用字符串 Hash 结果影响选词位置， 不会把英文、数字或原输入内容写入生成结果。
+4. Temperature 控制随机程度。温度越低，选词越稳定；温度越高，选词范围越宽、组合越跳跃。 
+5. 用户输入中的回车会影响生成段落数量。 
+6. 页面未使用外部图片、外部框架或第三方前端库。
+7. 本作品的交互规则设计和部分代码实现思路使用了 AI 辅助。 -->
+  <meta charset="UTF-8">
+  <title>形近填词诗机</title>
+  <style>
+    body { font-family: "Microsoft YaHei", Arial, sans-serif; font-size: 18px; background: #fafafa; margin: 0; padding: 20px; }
+    .box { max-width: 800px; margin: 0 auto; background: #fff; border: 1px solid #ddd; padding: 30px; box-sizing: border-box; }
+    h1 { font-size: 36px; margin-top: 0; }
+    textarea { width: 100%; height: 80px; font-size: 16px; padding: 10px; box-sizing: border-box; }
+    input[type="range"] { width: 220px; vertical-align: middle; }
+    button { font-size: 16px; margin: 10px 5px 0 0; padding: 6px 15px; cursor: pointer; }
+    #result { margin-top: 30px; white-space: pre-wrap; line-height: 1.8; font-size: 20px; color: #333; }
+    .small { font-size: 14px; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>形近填词诗机</h1>
+    <p>输入命题，机器将基于字形、长度、哈希与温度，生成荒诞但“形似扣题”的诗。</p>
+    
+    <textarea id="prompt" placeholder="在此输入命题，回车分行可生成多段...">春水
+AI dream</textarea>
+    
+    <div>
+      Temperature: <input id="temperature" type="range" min="0" max="1" step="0.01" value="0.55"> 
+      <b id="tempText">0.55</b>
+    </div>
+    
+    <button id="makeBtn">生成诗歌</button>
+    <button id="sampleBtn">换个示例</button>
+    <button id="clearBtn">清空</button>
+
+    <p class="small">提示：中文触发“形近字”匹配；英文/数字触发“哈希偏移”。Temperature 决定跳跃度。</p>
+    <div id="result"></div>
+  </div>
+
+  <script src="corpus.js"></script>
+  <script>
+    // 简写 DOM 获取器
+    const $ = id => document.getElementById(id);
+    const pInput = $('prompt'), resBox = $('result'), tInput = $('temperature'), tText = $('tempText');
+    
+    let corpus = null;
+
+    // 字符串哈希算法
+    const hashStr = str => Math.abs([...str].reduce((h, c) => (h << 5) - h + c.charCodeAt(0) | 0, 0));
+
+    // UI 事件绑定
+    tInput.oninput = () => tText.textContent = Number(tInput.value).toFixed(2);
+    $('clearBtn').onclick = () => { pInput.value = ""; resBox.textContent = ""; };
+    $('sampleBtn').onclick = () => {
+      const ex = ["春水\nAI dream", "雨中的机器\n404", "玻璃鸟\nfinal exam", "夜校\nmoon error"];
+      pInput.value = ex[Math.floor(Math.random() * ex.length)];
+      makePoem();
+    };
+    $('makeBtn').onclick = makePoem;
+
+    function makePoem() {
+      if (!window.POETRY_CORPUS) return resBox.textContent = "未找到 corpus.js 语料库！";
+      
+      // 使用 ES6 的 map 和正则极简清洗语料
+      if (!corpus) {
+        const clean = arr => (arr || []).map(w => String(w).replace(/[^\u4e00-\u9fa5]/g, "")).filter(Boolean);
+        corpus = { s: clean(POETRY_CORPUS.subjects), v: clean(POETRY_CORPUS.verbs), a: clean(POETRY_CORPUS.adjectives) };
+      }
+      if (!corpus.s.length || !corpus.v.length || !corpus.a.length) return resBox.textContent = "语料库缺少可用中文词。";
+
+      const text = pInput.value.trim();
+      if (!text) return resBox.textContent = "请先输入一个命题。";
+
+      const T = Number(tInput.value);
+      // 拆分行并逐行生成段落
+      resBox.textContent = text.split('\n').map((line, i) => makePart(line.trim() || "空白", i, T)).join("\n\n");
+    }
+
+    function makePart(input, pIdx, T) {
+      // 计算本段诗句行数
+      const lines = Math.max(2, Math.min(6, 2 + Math.floor(input.length / 8) + (hashStr(input) % 2) + Math.floor(T * 3)));
+      const revInput = [...input].reverse().join(""); 
+      const get = (type, offset, src = input) => pick(corpus[type], src, offset, T);
+
+      // 用模板字符串函数数组决定这句诗怎么拼接，这段代码是Gemini写出来的
+      const templates = [
+        (n1,n2,v1,v2,a1,a2) => `${a1}的${n1}${v1}`,
+        (n1,n2,v1,v2,a1,a2) => `${n1}${v1}于${a1}的${n2}`,
+        (n1,n2,v1,v2,a1,a2) => `${n1}把${n2}${v1}`,
+        (n1,n2,v1,v2,a1,a2) => `${a1}中${n1}与${n2}${v1}`,
+        (n1,n2,v1,v2,a1,a2) => `${n1}在${n2}里${v1}`,
+        (n1,n2,v1,v2,a1,a2) => `${a1}的${n1}，${a2}的${n2}${v2}`,
+        (n1,n2,v1,v2,a1,a2) => `${n1}和${n2}向${a1}处${v1}`,
+        (n1,n2,v1,v2,a1,a2) => `${a1}${n1}${v1}，${n2}${v2}`
+      ];
+
+      return Array.from({ length: lines }, (_, i) => {
+        const n1 = get('s', i), n2 = get('s', i+3, revInput);
+        const v1 = get('v', i+7), v2 = get('v', i+13, revInput);
+        const a1 = get('a', i+11), a2 = get('a', i+17, input+pIdx);
+
+        // 选择句型与标点。“标点”的设置和代码是ai自己加的，我原本并没有想设置这个
+        const mCount = T < 0.34 ? 4 : (T < 0.67 ? 6 : 8);
+        const mode = (hashStr(input + "-" + i + "-" + pIdx) + Math.floor(Math.random() * mCount * T)) % mCount;
+        
+        const puncs = T < 0.34 ? ["。","。","，"] : (T < 0.67 ? ["。","，","；"] : ["。","，","；","……"]);
+        const punc = puncs[(hashStr(input + "p" + i) + Math.floor(Math.random() * puncs.length * T)) % puncs.length];
+
+        return templates[mode](n1, n2, v1, v2, a1, a2) + punc;
+      }).join("\n");
+    }
+
+    function pick(list, input, offset, T) {
+      const zhMatches = input.match(/[\u4e00-\u9fa5]/g);
+      const seedStr = input + offset;
+      
+      // 1. 哈希偏移模式 (无中文时)
+      if (!zhMatches) {
+        const maxOff = Math.floor(list.length * T * 0.7);
+        const idx = hashStr(seedStr) % list.length + Math.floor((Math.random() * 2 - 1) * maxOff);
+        return list[((idx % list.length) + list.length) % list.length];
+      }
+
+      // 2. Unicode 形近/距离模式 (有中文时)
+      const targetCode = zhMatches[hashStr(seedStr) % zhMatches.length].charCodeAt(0);
+      
+      // 一步完成距离计算与排序
+      const scored = list.map(word => {
+        let best = Infinity;
+        for (let i = 0; i < word.length; i++) best = Math.min(best, Math.abs(word.charCodeAt(i) - targetCode));
+        return { word, score: best };
+      }).sort((a, b) => a.score - b.score);
+
+      // Temperature 决定检索范围
+      const minR = Math.max(3, Math.floor(scored.length * 0.04));
+      const maxR = Math.max(minR, Math.floor(scored.length * 0.65));
+      const range = Math.max(1, Math.min(scored.length, Math.floor(minR + (maxR - minR) * T)));
+
+      const idx = T < 0.2 ? hashStr(seedStr + zhMatches[0]) % range : Math.floor(Math.random() * range);
+      return scored[idx].word;
+    }
+  </script>
+</body>
+</html>
